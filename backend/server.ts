@@ -55,6 +55,7 @@ const knowledgeBase: KnowledgeBaseEntry[] = [
 interface Ticket {
   id: string;
   query: string;
+  email: string;
   timestamp: string;
 }
 
@@ -67,11 +68,12 @@ const getTickets = (): Ticket[] => {
   }
 };
 
-const saveTicket = (query: string): string => {
+const saveTicket = (query: string, email: string): string => {
   const tickets = getTickets();
   const newTicket: Ticket = {
     id: `TCK-${uuidv4().substring(0, 8).toUpperCase()}`,
     query,
+    email,
     timestamp: new Date().toISOString()
   };
   tickets.push(newTicket);
@@ -96,13 +98,23 @@ app.post('/api/chat', (req: Request, res: Response) => {
   if (match) {
     return res.json({ response: match.answer });
   } else {
-    // Beyond scope, create a ticket
-    const ticketId = saveTicket(message);
+    // Beyond scope, ask for email to create a ticket
     return res.json({ 
-      response: `I'm sorry, I don't have the answer to that query. I've created a support ticket for you. Your ticket number is ${ticketId}. A human reviewer will look into it shortly.`,
-      ticketId
+      response: "I'm sorry, I don't have the answer to that query. Would you like to create a support ticket? Please provide your email address so a human reviewer can look into it and get back to you.",
+      needsEmail: true
     });
   }
+});
+
+app.post('/api/tickets', (req: Request, res: Response) => {
+  const { query, email } = req.body;
+
+  if (!query || !email) {
+    return res.status(400).json({ error: 'Query and email are required' });
+  }
+
+  const ticketId = saveTicket(query, email);
+  res.json({ ticketId, response: `Successfully created support ticket: ${ticketId}. Our team will contact you at ${email} soon.` });
 });
 
 app.get('/api/tickets', (req: Request, res: Response) => {
