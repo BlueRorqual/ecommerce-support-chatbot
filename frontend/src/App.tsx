@@ -13,6 +13,7 @@ interface TicketData {
   id: string;
   query: string;
   email: string;
+  orderNumber?: string;
   timestamp: string;
 }
 
@@ -23,6 +24,7 @@ const App: React.FC = () => {
   ]);
   const [input, setInput] = useState('');
   const [emailInput, setEmailInput] = useState('');
+  const [orderNumberInput, setOrderNumberInput] = useState('');
   const [pendingQuery, setPendingQuery] = useState<string | null>(null);
   const [tickets, setTickets] = useState<TicketData[]>([]);
   const [loading, setLoading] = useState(false);
@@ -97,7 +99,11 @@ const App: React.FC = () => {
       const response = await fetch('/api/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: pendingQuery, email: emailInput })
+        body: JSON.stringify({ 
+          query: pendingQuery, 
+          email: emailInput,
+          orderNumber: orderNumberInput 
+        })
       });
       const data = await response.json();
       
@@ -108,6 +114,7 @@ const App: React.FC = () => {
       }]);
       setPendingQuery(null);
       setEmailInput('');
+      setOrderNumberInput('');
     } catch (error) {
       setMessages(prev => [...prev, { 
         text: "Failed to create ticket. Please try again.", 
@@ -166,6 +173,12 @@ const App: React.FC = () => {
                           value={emailInput}
                           onChange={(e) => setEmailInput(e.target.value)}
                         />
+                        <input 
+                          type="text" 
+                          placeholder="Order or Tracking Number (optional)" 
+                          value={orderNumberInput}
+                          onChange={(e) => setOrderNumberInput(e.target.value)}
+                        />
                         <button onClick={handleCreateTicket} disabled={loading}>
                           Create Ticket
                         </button>
@@ -207,6 +220,7 @@ const App: React.FC = () => {
                       <th>ID</th>
                       <th>Query</th>
                       <th>Email</th>
+                      <th>Order #</th>
                       <th>Timestamp</th>
                     </tr>
                   </thead>
@@ -216,6 +230,7 @@ const App: React.FC = () => {
                         <td><strong>{ticket.id}</strong></td>
                         <td>{ticket.query}</td>
                         <td>{ticket.email}</td>
+                        <td>{ticket.orderNumber || '-'}</td>
                         <td>{new Date(ticket.timestamp).toLocaleString()}</td>
                       </tr>
                     ))}
