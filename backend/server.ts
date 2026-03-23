@@ -6,6 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import sqlite3 from 'sqlite3';
+import { open, Database } from 'sqlite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,16 +15,12 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = path.join(__dirname, 'data');
-const TICKETS_FILE = path.join(DATA_DIR, 'tickets.json');
+const DB_FILE = path.join(DATA_DIR, 'database.sqlite');
+const OLD_TICKETS_FILE = path.join(DATA_DIR, 'tickets.json');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR);
-}
-
-// Ensure tickets file exists
-if (!fs.existsSync(TICKETS_FILE)) {
-  fs.writeFileSync(TICKETS_FILE, JSON.stringify([]));
 }
 
 app.use(cors());
@@ -60,27 +58,60 @@ interface Ticket {
   timestamp: string;
 }
 
-const getTickets = (): Ticket[] => {
-  try {
-    const data = fs.readFileSync(TICKETS_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (err) {
-    return [];
+let db: Database;
+
+const initDb = async () => {
+  db = await open({
+    filename: DB_FILE,
+    driver: sqlite3.Database
+  });
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS tickets (
+      id TEXT PRIMARY KEY,
+      query TEXT NOT NULL,
+      email TEXT NOT NULL,
+      orderNumber TEXT,
+      timestamp TEXT NOT NULL
+    )
+  `);
+
+  // Migration from JSON to SQLite
+  if (fs.existsSync(OLD_TICKETS_FILE)) {
+    try {
+      const data = fs.readFileSync(OLD_TICKETS_FILE, 'utf-8');
+      const tickets: Ticket[] = JSON.parse(data);
+      
+      for (const ticket of tickets) {
+        await db.run(
+          'INSERT OR IGNORE INTO tickets (id, query, email, orderNumber, timestamp) VALUES (?, ?, ?, ?, ?)',
+          [ticket.id, ticket.query, ticket.email || 'N/A', ticket.orderNumber || null, ticket.timestamp]
+        );
+      }
+      
+      // Rename old file to mark migration complete
+      fs.renameSync(OLD_TICKETS_FILE, `${OLD_TICKETS_FILE}.bak`);
+      console.log('Migrated data from tickets.json to SQLite');
+    } catch (err) {
+      console.error('Migration failed:', err);
+    }
   }
 };
 
-const saveTicket = (query: string, email: string, orderNumber?: string): string => {
-  const tickets = getTickets();
-  const newTicket: Ticket = {
-    id: `TCK-${uuidv4().substring(0, 8).toUpperCase()}`,
-    query,
-    email,
-    orderNumber,
-    timestamp: new Date().toISOString()
-  };
-  tickets.push(newTicket);
-  fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
-  return newTicket.id;
+const getTickets = async (): Promise<Ticket[]> => {
+  return db.all('SELECT * FROM tickets ORDER BY timestamp DESC');
+};
+
+const saveTicket = async (query: string, email: string, orderNumber?: string): Promise<string> => {
+  const ticketId = `TCK-${uuidv4().substring(0, 8).toUpperCase()}`;
+  const timestamp = new Date().toISOString();
+  
+  await db.run(
+    'INSERT INTO tickets (id, query, email, orderNumber, timestamp) VALUES (?, ?, ?, ?, ?)',
+    [ticketId, query, email, orderNumber || null, timestamp]
+  );
+  
+  return ticketId;
 };
 
 app.post('/api/chat', (req: Request, res: Response) => {
@@ -92,7 +123,6 @@ app.post('/api/chat', (req: Request, res: Response) => {
 
   const normalizedMessage = message.toLowerCase();
   
-  // Try to find a match in knowledge base
   const match = knowledgeBase.find(entry => 
     entry.keywords.some(keyword => normalizedMessage.includes(keyword))
   );
@@ -100,7 +130,6 @@ app.post('/api/chat', (req: Request, res: Response) => {
   if (match) {
     return res.json({ response: match.answer });
   } else {
-    // Beyond scope, ask for email to create a ticket
     return res.json({ 
       response: "I'm sorry, I don't have the answer to that query. Would you like to create a support ticket? Please provide your email and optionally an order or tracking number so a human reviewer can look into it and get back to you.",
       needsEmail: true
@@ -108,22 +137,35 @@ app.post('/api/chat', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/tickets', (req: Request, res: Response) => {
+app.post('/api/tickets', async (req: Request, res: Response) => {
   const { query, email, orderNumber } = req.body;
 
   if (!query || !email) {
     return res.status(400).json({ error: 'Query and email are required' });
   }
 
-  const ticketId = saveTicket(query, email, orderNumber);
-  res.json({ ticketId, response: `Successfully created support ticket: ${ticketId}. Our team will contact you at ${email} soon.` });
+  try {
+    const ticketId = await saveTicket(query, email, orderNumber);
+    res.json({ ticketId, response: `Successfully created support ticket: ${ticketId}. Our team will contact you at ${email} soon.` });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create ticket' });
+  }
 });
 
-app.get('/api/tickets', (req: Request, res: Response) => {
-  const tickets = getTickets();
-  res.json(tickets);
+app.get('/api/tickets', async (req: Request, res: Response) => {
+  try {
+    const tickets = await getTickets();
+    res.json(tickets);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch tickets' });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+// Initialize database and start server
+initDb().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to initialize database:', err);
 });
