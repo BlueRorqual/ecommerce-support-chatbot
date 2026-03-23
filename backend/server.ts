@@ -8,6 +8,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
+import * as dotenv from 'dotenv';
+import axios from 'axios';
+
+// Load environment variables
+dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '.env') });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,7 +94,6 @@ const initDb = async () => {
         );
       }
       
-      // Rename old file to mark migration complete
       fs.renameSync(OLD_TICKETS_FILE, `${OLD_TICKETS_FILE}.bak`);
       console.log('Migrated data from tickets.json to SQLite');
     } catch (err) {
@@ -114,27 +118,68 @@ const saveTicket = async (query: string, email: string, orderNumber?: string): P
   return ticketId;
 };
 
-app.post('/api/chat', (req: Request, res: Response) => {
+// --- Intelligent Chat (LLM Logic) ---
+const getLLMResponse = async (message: string): Promise<{ response: string; needsEmail: boolean }> => {
+  const provider = process.env.LLM_PROVIDER || 'keyword';
+  const normalizedMessage = message.toLowerCase();
+
+  // 1. Keyword-based matching (Fast first pass / Fallback)
+  const match = knowledgeBase.find(entry => 
+    entry.keywords.some(keyword => normalizedMessage.includes(keyword))
+  );
+
+  if (match) {
+    return { response: match.answer, needsEmail: false };
+  }
+
+  // 2. LLM Call if enabled
+  try {
+    if (provider === 'openai' && process.env.OPENAI_API_KEY) {
+      const res = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-3.5-turbo',
+        messages: [{ role: 'user', content: message }],
+      }, {
+        headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }
+      });
+      return { response: res.data.choices[0].message.content, needsEmail: false };
+    }
+
+    if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
+      const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+        contents: [{ parts: [{ text: message }] }]
+      });
+      return { response: res.data.candidates[0].content.parts[0].text, needsEmail: false };
+    }
+
+    if (provider === 'ollama') {
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434/api/generate';
+      const res = await axios.post(ollamaUrl, {
+        model: process.env.OLLAMA_MODEL || 'llama2',
+        prompt: message,
+        stream: false
+      });
+      return { response: res.data.response, needsEmail: false };
+    }
+  } catch (error) {
+    console.error('LLM API call failed:', error);
+  }
+
+  // 3. Fallback to ticket creation
+  return { 
+    response: "I'm sorry, I don't have the answer to that query. Would you like to create a support ticket? Please provide your email and optionally an order or tracking number so a human reviewer can look into it and get back to you.",
+    needsEmail: true
+  };
+};
+
+app.post('/api/chat', async (req: Request, res: Response) => {
   const { message } = req.body;
   
   if (!message) {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  const normalizedMessage = message.toLowerCase();
-  
-  const match = knowledgeBase.find(entry => 
-    entry.keywords.some(keyword => normalizedMessage.includes(keyword))
-  );
-
-  if (match) {
-    return res.json({ response: match.answer });
-  } else {
-    return res.json({ 
-      response: "I'm sorry, I don't have the answer to that query. Would you like to create a support ticket? Please provide your email and optionally an order or tracking number so a human reviewer can look into it and get back to you.",
-      needsEmail: true
-    });
-  }
+  const result = await getLLMResponse(message);
+  return res.json(result);
 });
 
 app.post('/api/tickets', async (req: Request, res: Response) => {
@@ -161,7 +206,6 @@ app.get('/api/tickets', async (req: Request, res: Response) => {
   }
 });
 
-// Initialize database and start server
 initDb().then(() => {
   app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
